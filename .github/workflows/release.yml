@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Private source branch, tag, or commit"
+        required: true
+        default: "main"
+        type: string
+      version:
+        description: "Release version, for example v0.1.0"
+        required: true
+        type: string
+      publish:
+        description: "Publish a GitHub Release"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Linux binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.cargo-home
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Check out public builder
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: builder
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: rustfmt
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.15.2
+
+      - name: Install cargo-zigbuild
+        shell: bash
+        run: cargo install cargo-zigbuild --version 0.23.0 --locked
+
+      - name: Check out private source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: fireunix-app/shadow-srelay
+          ref: ${{ inputs.source_ref }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+          persist-credentials: false
+          path: source
+
+      - name: Validate release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid release version: ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          cargo_version="$(awk -F '"' '/^version = "/ { print $2; exit }' source/Cargo.toml)"
+          if [[ "${RELEASE_TAG#v}" != "${cargo_version}" ]]; then
+            echo "release version does not match Cargo.toml ${cargo_version}" >&2
+            exit 1
+          fi
+
+      - name: Test and package
+        shell: bash
+        env:
+          VERSION_TAG: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${VERSION_TAG#v}"
+          cd source
+          cargo fmt --check
+          cargo test --locked
+
+          for target in \
+            x86_64-unknown-linux-gnu:amd64 \
+            aarch64-unknown-linux-gnu:arm64
+          do
+            rust_target="${target%%:*}"
+            release_target="${target##*:}"
+            archive="srelay-${version}-linux-${release_target}"
+            package_dir="../dist/${archive}"
+
+            RUSTFLAGS="-C strip=symbols" cargo zigbuild \
+              --release \
+              --locked \
+              --target "${rust_target}.2.17"
+
+            mkdir -p "${package_dir}/conf"
+            install -m 0755 "target/${rust_target}/release/SRelay" "${package_dir}/SRelay"
+            install -m 0644 deploy/srelay.service "${package_dir}/srelay.service"
+            install -m 0644 conf/dev.toml "${package_dir}/conf/example.toml"
+            install -m 0644 ../builder/README.md "${package_dir}/README.md"
+            tar -C ../dist -czf "../dist/${archive}.tar.gz" "${archive}"
+            rm -rf "${package_dir}"
+          done
+
+          cd ..
+          sha256sum dist/*.tar.gz > dist/SHA256SUMS
+          rm -rf source
+
+      - name: Store release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: srelay-release
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish GitHub Release
+        if: inputs.publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          assets=(dist/*.tar.gz dist/SHA256SUMS)
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber
+            exit 0
+          fi
+
+          gh release create "${RELEASE_TAG}" \
+            "${assets[@]}" \
+            --target "${GITHUB_SHA}" \
+            --title "SRelay ${RELEASE_TAG}" \
+            --notes "Binaries built from the configured private source ref."
