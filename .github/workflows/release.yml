@@ -85,37 +85,49 @@ jobs:
           VERSION_TAG: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          version="${VERSION_TAG#v}"
-          cd source
-          cargo fmt --check
-          cargo test --locked
+          private_log="${RUNNER_TEMP}/private-build.log"
+          set +e
+          (
+            set -euo pipefail
+            version="${VERSION_TAG#v}"
+            cd source
+            cargo fmt --check
+            cargo test --locked
 
-          for target in \
-            x86_64-unknown-linux-gnu:amd64 \
-            aarch64-unknown-linux-gnu:arm64
-          do
-            rust_target="${target%%:*}"
-            release_target="${target##*:}"
-            archive="srelay-${version}-linux-${release_target}"
-            package_dir="../dist/${archive}"
+            for target in \
+              x86_64-unknown-linux-gnu:amd64 \
+              aarch64-unknown-linux-gnu:arm64
+            do
+              rust_target="${target%%:*}"
+              release_target="${target##*:}"
+              archive="srelay-${version}-linux-${release_target}"
+              package_dir="../dist/${archive}"
 
-            RUSTFLAGS="-C strip=symbols" cargo zigbuild \
-              --release \
-              --locked \
-              --target "${rust_target}.2.17"
+              RUSTFLAGS="-C strip=symbols" cargo zigbuild \
+                --release \
+                --locked \
+                --target "${rust_target}.2.17"
 
-            mkdir -p "${package_dir}/conf"
-            install -m 0755 "target/${rust_target}/release/SRelay" "${package_dir}/SRelay"
-            install -m 0644 deploy/srelay.service "${package_dir}/srelay.service"
-            install -m 0644 conf/dev.toml "${package_dir}/conf/example.toml"
-            install -m 0644 ../builder/README.md "${package_dir}/README.md"
-            tar -C ../dist -czf "../dist/${archive}.tar.gz" "${archive}"
-            rm -rf "${package_dir}"
-          done
+              mkdir -p "${package_dir}/conf"
+              install -m 0755 "target/${rust_target}/release/SRelay" "${package_dir}/SRelay"
+              install -m 0644 deploy/srelay.service "${package_dir}/srelay.service"
+              install -m 0644 conf/dev.toml "${package_dir}/conf/example.toml"
+              install -m 0644 ../builder/README.md "${package_dir}/README.md"
+              tar -C ../dist -czf "../dist/${archive}.tar.gz" "${archive}"
+              rm -rf "${package_dir}"
+            done
 
-          cd ..
-          sha256sum dist/*.tar.gz > dist/SHA256SUMS
-          rm -rf source
+            cd ..
+            sha256sum dist/*.tar.gz > dist/SHA256SUMS
+            rm -rf source
+          ) >"${private_log}" 2>&1
+          status=$?
+          set -e
+          rm -f "${private_log}"
+          if (( status != 0 )); then
+            echo "::error::Private source build failed; detailed output was intentionally withheld."
+            exit "${status}"
+          fi
 
       - name: Store release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
