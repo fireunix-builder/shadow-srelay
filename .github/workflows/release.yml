@@ -59,9 +59,10 @@ jobs:
         with:
           repository: fireunix-app/shadow-srelay
           ref: ${{ inputs.source_ref }}
-          token: ${{ secrets.SOURCE_REPO_PAT }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           persist-credentials: false
           path: source
+          fetch-depth: 0
 
       - name: Validate release version
         shell: bash
@@ -82,16 +83,11 @@ jobs:
       - name: Validate private source tag
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
           RELEASE_TAG: ${{ inputs.version }}
         run: |
           set -euo pipefail
           source_sha="$(git -C source rev-parse HEAD)"
-          tag_object="$(gh api "repos/fireunix-app/shadow-srelay/git/ref/tags/${RELEASE_TAG}")"
-          tag_sha="$(jq -r '.object.sha' <<<"${tag_object}")"
-          if [[ "$(jq -r '.object.type' <<<"${tag_object}")" == "tag" ]]; then
-            tag_sha="$(gh api "repos/fireunix-app/shadow-srelay/git/tags/${tag_sha}" --jq '.object.sha')"
-          fi
+          tag_sha="$(git -C source rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
           if [[ "${source_sha}" != "${tag_sha}" ]]; then
             echo "::error::Release tag does not match the private source revision."
             exit 1
